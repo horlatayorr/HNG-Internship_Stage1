@@ -1,71 +1,86 @@
 #!/bin/bash
 
-# Check if the script is run as root
-if [[ $EUID -ne 0 ]]; then
-   echo "This script must be run as root" 
-   exit 1
+# Check if the input file is provided
+if [ -z "$1" ]; then
+  echo "Usage: $0 <name-of-text-file>"
+  exit 1
 fi
 
-# Check if the input file is provided and exists
-if [ $# -ne 1 ]; then
-    echo "Usage: $0 <usernames_file>"
-    exit 1
-fi
-
-if [ ! -f "$1" ]; then
-    echo "File $1 not found!"
-    exit 1
-fi
-
-# Log file and secure password storage
+INPUT_FILE=$1
 LOG_FILE="/var/log/user_management.log"
-PASSWORD_FILE="/var/secure/user_passwords.txt"
+PASSWORD_FILE="/var/secure/user_passwords.csv"
 
-# Ensure the existence of the log and password files and set appropriate permissions
-touch $LOG_FILE
-touch $PASSWORD_FILE
+# Create the necessary directories and set permissions
+mkdir -p /var/secure
+touch $LOG_FILE $PASSWORD_FILE
 chmod 600 $PASSWORD_FILE
 
-# Read the file line by line
-while IFS= read -r line
-do
-    # Extract username and groups, ignoring whitespace
-    IFS=';' read -ra ADDR <<< "$line"
-    username="${ADDR[0]}"
-    groups="${ADDR[1]// /}"
+# Function to log messages
+log_message() {
+  echo "$(date +"%Y-%m-%d %T") - $1" >> $LOG_FILE
+}
 
-    # Create a personal group for the user
-    if ! grep -q "^$username:" /etc/group; then
-        groupadd "$username"
-        echo "Group $username created." >> $LOG_FILE
-    fi
+# Function to generate random passwords
+generate_password() {
+  tr -dc A-Za-z0-9 </dev/urandom | head -c 12
+}
 
-    # Create the user with the personal group
-    if ! id "$username" &>/dev/null; then
-        useradd -m -g "$username" -s /bin/bash "$username"
-        echo "User $username with group $username created." >> $LOG_FILE
+# Read the input file line by line
+while IFS=';' read -r username groups; do
+  # Trim whitespace
+  username=$(echo "$username" | xargs)
+  groups=$(echo "$groups" | xargs)
 
-        # Generate a random password
-        password=$(openssl rand -base64 12)
-        echo "$username:$password" | chpasswd
-        echo "$username,$password" >> $PASSWORD_FILE
-        echo "Password for $username generated and stored securely." >> $LOG_FILE
-    else
-        echo "User $username already exists. Skipping." >> $LOG_FILE
-    fi
+  # Check if the line is empty
+  if [ -z "$username" ]; then
+    log_message "Empty or malformed line skipped."
+    continue
+  fi
 
-    # Assign additional groups, if any
-    if [ ! -z "$groups" ]; then
-        IFS=',' read -ra GROUPS <<< "$groups"
-        for group in "${GROUPS[@]}"; do
-            if ! grep -q "^$group:" /etc/group; then
-                groupadd "$group"
-                echo "Group $group created." >> $LOG_FILE
-            fi
-            usermod -aG "$group" "$username"
-            echo "User $username added to group $group." >> $LOG_FILE
-        done
-    fi
-done < "$1"
+  # Check if the user already exists
+  if id "$username" &>/dev/null; then
+    log_message "User $username already exists."
+    continue
+  fi
 
-echo "User creation process completed."
+  # Create the user's personal group
+  groupadd "$username"
+
+  # Create the user with the personal group
+  useradd -m -g "$username" -s /bin/bash "$username"
+  log_message "User $username created with personal group $username."
+
+  # Set permissions for the home directory
+  chmod 700 /home/"$username"
+  chown "$username":"$username" /home/"$username"
+
+  # Generate a random password for the user
+  password=$(generate_password)
+  echo "$username:$password" | chpasswd
+
+  # Add the user to the specified groups
+  if [ -n "$groups" ]; then
+    IFS=',' read -ra GROUPS <<< "$groups"
+    for group in "${GROUPS[@]}"; do
+      group=$(echo "$group" | xargs) # Trim whitespace
+      # Check if the group exists, create if it doesn't
+      if ! getent group "$group" &>/dev/null; then
+        groupadd "$group"
+        log_message "Group $group created."
+      fi
+      usermod -aG "$group" "$username"
+      log_message "User $username added to group $group."
+    end
+  fi
+
+  # Save the password securely
+  echo "$username,$password" >> $PASSWORD_FILE
+  log_message "Password for user $username stored securely."
+done < "$INPUT_FILE"
+
+log_message "User and group creation process completed."
+
+# Set the correct permissions for the log file
+chmod 644 $LOG_FILE
+
+echo "User creation process completed. Check $LOG_FILE for details."
