@@ -1,106 +1,106 @@
 #!/bin/bash
 
-# Check if the input file is provided
-if [ -z "$1" ]; then
-  echo "Usage: $0 <name-of-text-file>"
-  exit 1
+# Check if running as root
+if [[ $UID -ne 0 ]]; then
+   echo "This script must be run as root"
+   exit 1
 fi
 
-INPUT_FILE=$1
+# Define the input file, log file, and secure password file
+INPUT_FILE="$1"
 LOG_FILE="/var/log/user_management.log"
-PASSWORD_FILE="/var/secure/user_passwords.txt"
+PASSWORD_FILE="/var/secure/user_passwords.csv"
 
-# Create the necessary directories and set permissions
+# Check if the input file was provided and exists
+if [[ -z "$INPUT_FILE" ]]; then
+   echo "No input file provided."
+   exit 1
+fi
+if [[ ! -f "$INPUT_FILE" ]]; then
+   echo "File $INPUT_FILE not found."
+   exit 1
+fi
+
+# Create the log file and password file if they don't exist
+touch "$LOG_FILE"
 mkdir -p /var/secure
-touch $LOG_FILE $PASSWORD_FILE
-chmod 600 $PASSWORD_FILE
+touch "$PASSWORD_FILE"
 
-# Function to log messages
-log_message() {
-  echo "$(date +"%Y-%m-%d %T") - $1" >> $LOG_FILE
-}
-#Backing up created files
-log_message "Backing up created files"
-cp "$PASSWORD_FILE" "${PASSWORD_FILE}.bak"
-cp "LOG_FILE" "${LOG_FILE}.bak"
-
-# Function to generate random passwords
+# Function to generate a random password
 generate_password() {
   tr -dc A-Za-z0-9 </dev/urandom | head -c 12
 }
 
-# Read the input file line by line
-while IFS=';' read -r username groups; do
-  # Trim whitespace
-  username=$(echo "$username" | xargs)
-  groups=$(echo "$groups" | xargs)
+# Function to log messages
+log_message() {
+  echo "$1" | tee -a "$LOG_FILE"
+}
 
-  #Parse the username and groups
+log_message "Backing up created files"
+# Backup existing files
+cp "$PASSWORD_FILE" "${PASSWORD_FILE}.bak"
+cp "$LOG_FILE" "${LOG_FILE}.bak"
+
+# Set permissions for password file
+chmod 600 "$PASSWORD_FILE"
+
+# Read the input file line by line
+while IFS=';' read -r username groups || [[ -n "$username" ]]; do
+   # Ignore whitespace
+  username=$(echo "$username" | sed 's/ //g')
+  groups=$(echo "$groups" | sed 's/ //g')
+
+  # Parse the username and groups
   echo "$username"
   echo "$groups"
 
-  # Check if the line is empty
-  if [ -z "$username" ]; then
-    log_message "Empty or malformed line skipped."
-    continue
-  fi
-
-  # Check if the user already exists
+  # Create the user and their personal groups if they don't exist
   if id "$username" &>/dev/null; then
-    log_message "User $username already exists."
+      log_message "User $username already exists. Skipping..."
   else
-    # Create the user's personal group
-    groupadd "$username"
-    # Create the user with the personal group
-    useradd -m -g "$username" -s /bin/bash "$username"
-    if [ $? -eq 0 ]; then
-      log_message "User $username created with home directory."
-    else
-      log_message "Failed to create user $username."
-        continue
-    fi
-
-  # Set permissions for the home directory
-  chmod 700 /home/"$username"
-  chown "$username":"$username" /home/"$username"
-  log_message "Home directory Permissions set for user $username."
-
-  # Generate a random password for the user
-  password=$(generate_password)
-  echo "$username:$password" | chpasswd
-  if [ $? -eq 0 ]; then
-    log_message "Password for user $username set."
-  else
-    log_message "Failed to set password for user $username."
-  fi
-  # Save the password securely
-  echo "$username,$password" >> $PASSWORD_FILE
-  log_message "Password for user $username stored securely."
-
-# Add the user to the specified groups
-if [ -n "$groups" ]; then
-    IFS=',' read -ra groups_ARRAY <<< "$groups"
-    for groups in "${groups_ARRAY[@]}"; do
-      # Check if the group exists, create if it doesn't
-      if ! getent group "$groups" &>/dev/null; then
-        groupadd "$groups"
-        log_message "Group $groups created."
-      fi
-      #Add User to the groups
-      usermod -aG "$groups" "$username"
+      # Create personal groups for the user
+      groupadd "$username"
+      # Create user with their personal groups
+      useradd -m -s /bin/bash -g "$username" "$username"
       if [ $? -eq 0 ]; then
-          log_message "User $username added to group $groups."
+          log_message "User $username created with home directory."
       else
-          log_message "Failed to add user $username to group $groups."
-        fi
-    done
+          log_message "Failed to create user $username."
+          continue
+      fi
+      # Generate a random password and set it for the user
+      PASSWORD=$(generate_password)
+      echo "$username,$PASSWORD"
+      if [ $? -eq 0 ]; then
+          log_message "Password for user $username set."
+      else
+          log_message "Failed to set password for user $username."
+      fi
+      # Store the password securely
+      echo "$username,$PASSWORD" >> "$PASSWORD_FILE"
+      # Set the correct permissions for the home directory
+      chmod 700 /home/"$username"
+      chown "$username":"$username" /home/"$username"
+      log_message "Home directory permissions set for user $username."
   fi
 
- 
+  # Add user to additional groups
+  if [ -n "$groups" ]; then
+      IFS=',' read -r -a groups_ARRAY <<< "$groups"
+      for groups in "${groups_ARRAY[@]}"; do
+          # Create groups if it doesn't exist
+          if ! getent group "$groups" > /dev/null 2>&1; then
+              groupadd "$groups"
+              log_message "group $groups created."
+          fi
+          # Add user to the groups
+          usermod -a -G "$groups" "$username"
+          if [ $? -eq 0 ]; then
+              log_message "User $username added to groups $groups."
+          else
+              log_message "Failed to add user $username to groups $groups."
+          fi
+      done
+  fi
 done < "$INPUT_FILE"
-log_message "User and group creation process completed."
-
-# Set the correct permissions for the log file
-chmod 644 $LOG_FILE
-
-echo "User creation process completed. Check $LOG_FILE for details."
+log_message "User creation process completed."
